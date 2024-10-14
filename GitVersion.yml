@@ -1,0 +1,19 @@
+mode: ContinuousDelivery
+branches:
+  main:
+    increment: Minor
+  develop:
+    increment: Minor
+  feature:
+    increment: Minor
+    regex: 'feature[/-]'
+    source-branches: ['develop', 'main']
+    tracks-release-branches: false
+    is-release-branch: false
+  release:
+    increment: Patch
+  hotfix:
+    increment: Patch
+ignore:
+  sha: []
+
