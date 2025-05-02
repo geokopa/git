@@ -1,1 +1,118 @@
-test
+using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using OpenTelemetry;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using OpenTelemetryDemo;
+using VaultSharp.Extensions.Configuration;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Read Vault settings from configuration
+var vaultSettings = builder.Configuration.GetSection("Vault");
+var vaultAddress = vaultSettings["Address"];
+var vaultToken = vaultSettings["Token"];
+var secretPath = vaultSettings["SecretPath"];
+var mountPoint = vaultSettings["MountPoint"] ?? "secret";
+
+// Add Vault configuration provider
+builder.Configuration.AddVaultConfiguration(options: () =>
+    new VaultOptions(vaultAddress, vaultToken, reloadOnChange: true, reloadCheckIntervalSeconds: 60),
+    secretPath,
+    mountPoint);
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+{
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"));
+});
+
+builder.Services.AddOpenApi();
+
+builder.Logging.ClearProviders();
+builder.Logging.AddOpenTelemetry(cfg =>
+{
+    cfg.IncludeScopes = true;
+    cfg.IncludeFormattedMessage = true;
+});
+
+builder.Services.AddOpenTelemetry()
+    .WithMetrics(metrics =>
+    {
+        metrics.AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddRuntimeInstrumentation();
+    })
+    .WithTracing(tracing =>
+    {
+        tracing.AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation()
+            .AddNpgsql();
+    })
+    .ConfigureResource(resource => resource.AddService(serviceName: "OpenTelemetryDemo"))
+    .UseOtlpExporter();
+
+
+
+builder.Services.AddHttpClient("Placeholder", client =>
+{
+    client.BaseAddress = new Uri("https://jsonplaceholder.typicode.com");
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+var app = builder.Build();
+
+var scope = app.Services.CreateScope();
+
+await scope.ServiceProvider.GetRequiredService<AppDbContext>().Database.EnsureCreatedAsync();
+
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+}
+
+app.UseHttpsRedirection();
+
+var summaries = new[]
+{
+    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
+};
+
+app.MapGet("/weatherforecast", async (ILogger<Program> logger, IHttpClientFactory httpClientFactory, AppDbContext dbContext, IConfiguration configuration) =>
+    {
+        var secretValue = configuration["appsecret"];
+        
+        var person = new Person
+        {
+            Id = Guid.NewGuid(),
+            FullName = "John Doe"
+        };
+
+        dbContext.People.Add(person);
+        await dbContext.SaveChangesAsync();
+
+        var client = httpClientFactory.CreateClient("Placeholder");
+
+        var response = await client.GetAsync("/posts");
+
+        logger.LogInformation("Getting weather forecast at {Time}", DateTime.Now.ToLocalTime());
+
+        var forecast = Enumerable.Range(1, 5).Select(index =>
+                new WeatherForecast
+                (
+                    DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
+                    Random.Shared.Next(-20, 55),
+                    summaries[Random.Shared.Next(summaries.Length)]
+                ))
+            .ToArray();
+        return forecast;
+    })
+    .WithName("GetWeatherForecast");
+
+app.Run();
+
+internal record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
+{
+    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
+}
